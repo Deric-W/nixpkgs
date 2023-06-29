@@ -231,7 +231,7 @@ in
         preStart = mkIf (cfg.secretFile != null) ''
           set -u
           umask 177
-          jq --slurp '.[0] * .[1]' "${configFile}" "$CREDENTIALS_DIRECTORY/secretFile" > "${mergedConfig}"
+          jq --slurp '.[0] * .[1]' ${lib.escapeShellArg configFile} "$CREDENTIALS_DIRECTORY/secretFile" > ${lib.escapeShellArg mergedConfig}
         '';
 
         serviceConfig = {
