@@ -210,7 +210,7 @@ in
 
         environment = {
           LEMMY_CONFIG_LOCATION = if cfg.secretFile == null then configFile else mergedConfig;
-          LEMMY_DATABASE_URL = mkIf (cfg.database.uri != null) cfg.database.uri;
+          LEMMY_DATABASE_URL = if cfg.database.uri != null then cfg.database.uri else (mkIf (cfg.database.createLocally) "postgres:///lemmy?host=/run/postgresql&user=lemmy");
         };
 
         documentation = [
