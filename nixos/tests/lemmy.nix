@@ -28,7 +28,7 @@ in
           # https://github.com/LemmyNet/lemmy/blob/50efb1d519c63a7007a07f11cc8a11487703c70d/crates/utils/src/settings/mod.rs#L52
           database.uri = "postgres:///lemmy?host=/run/postgresql&user=lemmy";
         };
-        secretFile = "/etc/lemmy-config.hjson";
+        secretFile = /etc/lemmy-config.hjson;
         caddy.enable = true;
       };
 

@@ -78,7 +78,7 @@ in
     };
 
     secretFile = mkOption {
-      type = with types; nullOr str;
+      type = with types; nullOr path;
       default = null;
       description = lib.mdDoc "Path to a secret JSON configuration file which is merged at runtime with the one generated from {option}`services.lemmy.settings`.";
     };
@@ -238,7 +238,7 @@ in
           DynamicUser = true;
           RuntimeDirectory = "lemmy";
           ExecStart = "${cfg.server.package}/bin/lemmy_server";
-          LoadCredential = mkIf (cfg.secretFile != null) "secretFile:${cfg.secretFile}";
+          LoadCredential = mkIf (cfg.secretFile != null) "secretFile:${toString cfg.secretFile}";
           PrivateTmp = true;
           MemoryDenyWriteExecute = true;
           NoNewPrivileges = true;
