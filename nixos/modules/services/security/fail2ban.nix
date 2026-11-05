@@ -112,6 +112,28 @@ let
           ln -s "''${paths[$path]}" "$out/$path"
         done
       '';
+
+  configCheck =
+    pkgs.runCommand "fail2ban config validation"
+      {
+        inherit configDir;
+        nativeBuildInputs = [ cfg.package ];
+        preferLocalBuild = true;
+      }
+      ''
+        set +e
+        output="$(fail2ban-client --conf "$configDir" --test)"
+        ret="$?"
+        set -e
+
+        # supress output if there are no errors
+        if [ "$ret" -ne 0 ]
+        then
+          echo "$output"
+          exit "$ret"
+        fi
+        touch "$out"
+      '';
 in
 
 {
@@ -448,6 +470,10 @@ in
         '';
       };
 
+      enableConfigCheck = lib.mkEnableOption "checking the resulting configuration files" // {
+        default = true;
+        example = false;
+      };
     };
 
   };
@@ -580,5 +606,7 @@ in
     # Benefits from verbose sshd logging to observe failed login attempts,
     # so we set that here unless the user overrode it.
     services.openssh.settings.LogLevel = lib.mkDefault "VERBOSE";
+
+    system.checks = lib.mkIf cfg.enableConfigCheck [ configCheck ];
   };
 }
