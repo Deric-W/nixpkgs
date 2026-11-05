@@ -13,27 +13,26 @@ let
     mkKeyValue = lib.generators.mkKeyValueDefault { } " = ";
   };
 
-  mkInlineFilterName = name: "nixos-${name}";
-
-  mkJailConfig =
-    name: attrs:
-    lib.optionalAttrs (name != "DEFAULT") { inherit (attrs) enabled; }
-    // lib.optionalAttrs (attrs.filter != null) {
-      filter = if (lib.isString attrs.filter) then attrs.filter else mkInlineFilterName name;
-    }
-    // attrs.settings;
-
-  fail2banConf = configFormat.generate "fail2ban.local" cfg.daemonSettings;
-
-  strJails = lib.filterAttrs (_: lib.isString) cfg.jails;
-  attrsJails = lib.filterAttrs (_: lib.isAttrs) cfg.jails;
-
-  jailConf =
+  configDir =
     let
-      configFile = configFormat.generate "jail.local" (
+      fail2banConf = configFormat.generate "fail2ban.local" cfg.daemonSettings;
+
+      mkInlineFilterName = name: "nixos-${name}";
+
+      mkJailConfig =
+        name: attrs:
+        lib.optionalAttrs (name != "DEFAULT") { inherit (attrs) enabled; }
+        // lib.optionalAttrs (attrs.filter != null) {
+          filter = if (lib.isString attrs.filter) then attrs.filter else mkInlineFilterName name;
+        }
+        // attrs.settings;
+      attrsJails = lib.filterAttrs (_: lib.isAttrs) cfg.jails;
+      jailConfigFile = configFormat.generate "jail.local" (
         { INCLUDES.before = "paths-nixos.conf"; } // (lib.mapAttrs mkJailConfig attrsJails)
       );
-      extraConfig = lib.concatStringsSep "\n" (
+
+      strJails = lib.filterAttrs (_: lib.isString) cfg.jails;
+      extraJailConfig = lib.concatStringsSep "\n" (
         lib.attrValues (
           lib.mapAttrs (
             name: def:
@@ -45,38 +44,74 @@ let
         )
       );
 
+      jailConf = pkgs.concatText "jail.local" [
+        jailConfigFile
+        (pkgs.writeText "extra-jail.local" extraJailConfig)
+      ];
+
+      mkLocal =
+        type: name: attrs:
+        lib.nameValuePair "${type}.d/${name}.local" (configFormat.generate "${type}.d/${name}.local" attrs);
+      mkInlineFilter = name: attrs: mkLocal "filter" (mkInlineFilterName name) attrs.filter;
+
+      inlineFilters = (
+        lib.mapAttrs' mkInlineFilter (
+          lib.filterAttrs (_: v: v.filter != null && !lib.isString v.filter) attrsJails
+        )
+      );
+      explicitFilters = (lib.mapAttrs' (mkLocal "filter") cfg.filters);
+      explicitActions = (lib.mapAttrs' (mkLocal "action") cfg.actions);
     in
-    pkgs.concatText "jail.local" [
-      configFile
-      (pkgs.writeText "extra-jail.local" extraConfig)
-    ];
+    pkgs.runCommandLocal "fail2ban-config"
+      {
+        fail2ban = cfg.package;
+        paths =
+          lib.zipAttrsWith
+            (
+              name: values:
+              if lib.length values > 1 then
+                lib.throw "collision when building fail2ban configuration directory: ${name}"
+              else
+                lib.head values
+            )
+            [
+              {
+                "fail2ban.local" = fail2banConf;
+                "jail.local" = jailConf;
+              }
+              inlineFilters
+              explicitFilters
+              explicitActions
+            ];
+        __structuredAttrs = true;
+      }
+      ''
+        # link builtin config files
+        cp -r --symbolic-link --no-preserve=mode "$fail2ban/etc/fail2ban" "$out"
+        rmdir "$out/fail2ban.d" "$out/jail.d"
 
-  pathsConf = pkgs.writeText "paths-nixos.conf" ''
-    # NixOS
+        # setup paths configuration
+        rm "$out/paths-arch.conf" "$out/paths-debian.conf" "$out/paths-fedora.conf"
+        rm "$out/paths-freebsd.conf" "$out/paths-opensuse.conf" "$out/paths-osx.conf"
+        cat > "$out/paths-nixos.conf" <<EOF 
+        # NixOS
 
-    [INCLUDES]
+        [INCLUDES]
 
-    before = paths-common.conf
+        before = paths-common.conf
 
-    after  = paths-overrides.local
+        after  = paths-overrides.local
 
-    [DEFAULT]
-  '';
+        [DEFAULT]
+        EOF
 
-  mkLocal =
-    type: name: attrs:
-    lib.nameValuePair "fail2ban/${type}.d/${name}.local" {
-      source = configFormat.generate "${type}.d/${name}.local" attrs;
-    };
-  mkInlineFilter = name: attrs: mkLocal "filter" (mkInlineFilterName name) attrs.filter;
-
-  inlineFilters = (
-    lib.mapAttrs' mkInlineFilter (
-      lib.filterAttrs (_: v: v.filter != null && !lib.isString v.filter) attrsJails
-    )
-  );
-  explicitFilters = (lib.mapAttrs' (mkLocal "filter") cfg.filters);
-  explicitActions = (lib.mapAttrs' (mkLocal "action") cfg.actions);
+        # link additional paths
+        for path in "''${!paths[@]}"
+        do
+          mkdir -p "$(dirname "$out/$path")"
+          ln -s "''${paths[$path]}" "$out/$path"
+        done
+      '';
 in
 
 {
@@ -335,9 +370,8 @@ in
           {command}`iptables`) that is triggered when a
           filter applied to a log file triggers more than a certain
           number of times in a certain time period.  Actions are
-          defined in {file}`/etc/fail2ban/action.d`,
-          while filters are defined in
-          {file}`/etc/fail2ban/filter.d`.
+          defined by [](#opt-services.fail2ban.actions), while
+          filters are defined by [](#opt-services.fail2ban.filters).
 
           NixOS comes with a default `sshd` jail;
           for it to work well,
@@ -428,6 +462,16 @@ in
           Options `services.fail2ban.bantime-increment.formula` and `services.fail2ban.bantime-increment.multipliers` cannot be both specified.
         '';
       }
+      {
+        assertion =
+          let
+            isInConfigDir = entry: entry.enable && lib.hasPrefix "fail2ban/" entry.target;
+          in
+          !lib.any isInConfigDir (lib.attrValues config.environment.etc);
+        message = ''
+          Entries of `environment.etc` setting up `/etc/fail2ban` have no effect, replace them with the options of `services.fail2ban`.
+        '';
+      }
     ];
 
     warnings = lib.mkIf (!config.networking.firewall.enable && !config.networking.nftables.enable) [
@@ -436,41 +480,14 @@ in
 
     environment.systemPackages = [ cfg.package ];
 
-    environment.etc = lib.mkMerge [
-      {
-        "fail2ban/fail2ban.conf".source = "${cfg.package}/etc/fail2ban/fail2ban.conf";
-        "fail2ban/fail2ban.local".source = fail2banConf;
-        "fail2ban/jail.conf".source = "${cfg.package}/etc/fail2ban/jail.conf";
-        "fail2ban/jail.local".source = jailConf;
-        "fail2ban/paths-common.conf".source = "${cfg.package}/etc/fail2ban/paths-common.conf";
-        "fail2ban/paths-nixos.conf".source = pathsConf;
-        "fail2ban/action.d".source = "${cfg.package}/etc/fail2ban/action.d/*.conf";
-        "fail2ban/filter.d".source = "${cfg.package}/etc/fail2ban/filter.d/*.conf";
-      }
-      inlineFilters
-      explicitFilters
-      explicitActions
-    ];
+    environment.etc."fail2ban".source = configDir;
 
     systemd.packages = [ cfg.package ];
     systemd.services.fail2ban = {
       wantedBy = [ "multi-user.target" ];
       partOf = lib.optional config.networking.firewall.enable "firewall.service";
 
-      restartTriggers =
-        let
-          generatedFiles = etcEntries: map (entry: entry.source) (lib.attrValues etcEntries);
-        in
-        lib.concatLists [
-          [
-            fail2banConf
-            jailConf
-            pathsConf
-          ]
-          (generatedFiles inlineFilters)
-          (generatedFiles explicitFilters)
-          (generatedFiles explicitActions)
-        ];
+      restartTriggers = [ configDir ];
 
       path = [
         cfg.package
